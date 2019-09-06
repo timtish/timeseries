@@ -1,14 +1,23 @@
-import os, sys, io, libarchive
-import pyarrow as pa
+import io, libarchive
 import pandas as pd
 import numpy as np
-from attr.validators import instance_of
 from pandas.io.json._json import JsonReader
 
 
 def parse_data(file_path, columns, verbose=1, nrows=1000):
     """
-    Чтение файла (csv,gz,7z) в pandas (ts,open,high,low,close,vol,count)
+    Чтение файла (csv,gz,7z) в pandas
+
+    :param columns кодовое название формата файла - csv/json и список колонок
+    :param nrows ограничение количества читаемых строк
+
+    :return  (ts,open,high,low,close,vol,count,ts_end,...)
+        ts - дата+время точки или начала интервала
+        ts - дата+время закрытия интервала
+        open,high,low,close - значения
+        vol - сумма за интервал или значение тика
+        count - количество за интервал
+        остальные поля, если есть, остаются без переименования
     """
 
     if columns in ('ts_last_vol', 'ts_open_hi_low_close_vol'):
@@ -22,7 +31,7 @@ def parse_data(file_path, columns, verbose=1, nrows=1000):
             convert_dates=['time_period_start', 'time_period_end', 'time_open', 'time_close'], orient='records')
         if isinstance(data, JsonReader): data = next(data)  # todo: read all
         data = data.rename(columns={'time_open': 'ts', 'price_open': 'open', 'price_high': 'high', 'price_low': 'low',
-                             'price_close': 'close', 'volume_traded': 'vol', 'trades_count': 'count'}, errors="raise")
+                             'price_close': 'close', 'volume_traded': 'vol', 'trades_count': 'count', 'time_close': 'ts_end'}, errors="raise")
 
     else:
         data = pd.read_csv(file_to_pandas(file_path), engine='python', nrows=nrows)
@@ -46,7 +55,6 @@ class GeneratorToFileReader(io.TextIOBase):
 def file_to_pandas(file_path):
     if file_path.endswith('.7z'):
         def iterator7z():
-            import libarchive
             with libarchive.file_reader(file_path) as e:
                 for entry in e:
                     for block in entry.get_blocks():
@@ -56,19 +64,87 @@ def file_to_pandas(file_path):
         return file_path
 
 
-def save_time_series(data, file_path):
-    # table = pa.Table.from_pandas(data) # pandas.core.frame.DataFrame to pyarrow.lib.Table
-    # with os.open(file_path, "wb") as file: pa.
-    data.to_csv(file_path, index=False, compression='gz', line_terminator='\r\n')
+def save_time_series(data, file_path, form='csv', verbose=1):
+    """
+    Сохранение файла на диск, с перезаписью!
+    :param data: данные
+    :param file_path: куда сохранять
+    :param form: 'csv' для читаемости или 'parquet' для малого размера
+    :param verbose:
+    """
+
+    if form == 'csv':
+        data.to_csv(file_path,
+                    index=True,
+                    compression='gzip',  # автоматическое сжатие
+                    line_terminator='\r\n')  # так универсальнее
+
+    # формат .parquet в несколько раз компактнее и достаточно распространён при обработке "больших данных"
+    # но сжимается стандартным алгоритмом хуже
+    if form == 'parquet':
+        data.to_parquet(file_path)
+
+    # вывод того что сохраняли
+    if verbose:
+        print(f"file saved to {file_path}")
+        print(data.head())
 
 
-def resample_time_series(data, interval='24H'):
+def resample_time_series(data, interval='24H', form='bar'):
+    """
+    Приведение к общему виду
+    :param data: pandas DataFrame from parse_data()
+    :param interval: можно указать None чтобы не реземплить, а только поправить порядок колонок (оставив только нужные)
+    :param form: формат результата (набор колонок)
+            'bar' - свеча/бар (агрегированые ресемплингом по заданному интервалу)
+                (ts, open, high, low, close, vol, count)
+            'tick' - тик (можно получить не из всех датасетов)
+                (ts, 'bid', 'ask', last, vol, flags)
+            'funnel' - какая-то урезанная свеча, встречается в некоторых примерах
+                (ts, open, high, low)
+        колонка ts присутствует в наборе данных в качестве индекса а не отдельной колонки
+    """
+
+    if 'bar' == form:
+        if interval is None:
+            return data[['open', 'high', 'low', 'close', 'vol']]
+        else:
+            return data.resample(interval).agg({
+                'open': lambda x: x[0],
+                'high': 'max',
+                'low': 'min',
+                'close': lambda x: x[-1],
+                'vol': 'sum',
+                'count': 'sum'})
+
+    if 'tick' == form:
+        if interval is None:
+            return data[['vol']]
+        else:
+            return data.resample(interval).agg({'vol': 'sum'})
+
+    if 'funnel' == form:
+        if interval is None:
+            return data[['open', 'high', 'low']]
+        else:
+            return data.resample(interval).agg({
+                'open': {'open': np.min},
+                'high': {'high': np.max},
+                'low': {'low': np.min}
+                })
+
+    # тут можно экспериментировать с другими агрегатами
     return data.resample(interval).agg({
-        "high": {"high": np.max},
-        "low": {"low": np.min},
-        "vol": {"vol_plus": np.sum, "vol_minus": np.min, "vol": np.sum},
-        "count": {"count": np.sum}
+        'open': {'open': take_first},
+        'high': {'high': np.max},
+        'low': {'low': np.min},
+        'close': {'close': take_last},
+        'vol': {'vol': np.sum,
+                'vol_plus': np.sum,  # отдельно сумма только положительных
+                'vol_minus': np.min},
+        'count': {'count': np.sum}
         })
+
 
 
 # <TICKER>,<PER>,<DATE>,<TIME>,<LAST>,<VOL>
@@ -91,4 +167,18 @@ data = parse_data('data/BITSTAMP_SPOT_BTC_USD_1MIN.txt.gz', 'json_interval_hi_vo
 data = data[['high', 'low', 'vol', 'count']]
 print(data)
 print(resample_time_series(data, '7D'))
+
+
+# а теперь, после тестовых чтений разных файлов, само преобразование всего нужного файла
+# исходные файлы в каталоге data лежат только локально, т.к. в guthub не желательно закачивать большие файлы
+
+data_2 = parse_data('data/BITSTAMP_SPOT_BTC_USD_1MIN_tslab (1).txt.gz', 'ts_open_hi_low_close_vol', nrows=None, verbose=0)
+data_2 = resample_time_series(data_2, form='bar', interval=None)
+save_time_series(data_2, "data/BITSTAMP_SPOT_BTC_USD_1MIN_tslab.candlesticks.csv.gz")
+
+# проверка
+df = pd.read_csv('data/BITSTAMP_SPOT_BTC_USD_1MIN_tslab.candlesticks.csv.gz', nrows=100, index_col=0, parse_dates=[0])
+print(df.index.values.dtype)
+print(df.head())
+
 
