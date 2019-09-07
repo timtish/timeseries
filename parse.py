@@ -105,9 +105,27 @@ def resample_time_series(data, interval='24H', form='bar'):
         колонка ts присутствует в наборе данных в качестве индекса а не отдельной колонки
     """
 
+    def first(x): return x[0]
+    def last(x): return x[-1]
+    def count(x): return len(x)
+
     if 'bar' == form:
-        if interval is None:
+
+        if interval is None:  # только пересборка порядка столбцов
             return data[['open', 'high', 'low', 'close', 'vol']]
+
+        if 'open' not in data.columns:  # конвертация из тиков
+            return data.resample(interval).agg({
+                'vol': {
+                    'vol': np.sum,
+                    'count': count},
+                'close': {
+                    'open': first,
+                    'high': np.max,
+                    'low': np.min,
+                    'close': last}
+            })
+
         else:
             return data.resample(interval).agg({
                 'open': lambda x: x[0],
@@ -135,50 +153,67 @@ def resample_time_series(data, interval='24H', form='bar'):
 
     # тут можно экспериментировать с другими агрегатами
     return data.resample(interval).agg({
-        'open': {'open': take_first},
+        'open': {'open': first},
         'high': {'high': np.max},
         'low': {'low': np.min},
-        'close': {'close': take_last},
+        'close': {'close': last},
         'vol': {'vol': np.sum,
                 'vol_plus': np.sum,  # отдельно сумма только положительных
                 'vol_minus': np.min},
         'count': {'count': np.sum}
         })
 
+def debug_parse():
+
+    # <TICKER>,<PER>,<DATE>,<TIME>,<LAST>,<VOL>
+    # BTC-PERPETUAL,0,20190508,221239,5881.500000000,1080
+    parse_data('data/2019-05-01_2019-06-01_BTC_PERP_DER_TICKS.txt', 'ts_last_vol')
+
+    # <TICKER>,<PER>,<DATE>,<TIME>,<OPEN>,<HIGH>,<LOW>,<CLOSE>,<VOL>
+    # bitstamp 1 2011-09-13 00:00:00 135300 5.8 6.0 5.8 6.0 25.0
+    parse_data('data/BITSTAMP_SPOT_BTC_USD_1MIN_tslab (1).txt.gz', 'ts_open_hi_low_close_vol')
+
+    # bitfinex,1,20190526,144300,7998.0,8000.0,7998.0,7998.4,0.3683383\r\n
+    parse_data('data/TSLAB_1m_BTUSD_bitfinex.7z', 'ts_open_hi_low_close_vol')
+    parse_data('data/TSLAB_1m_ETHUSD_bitfinex (1).7z', 'ts_open_hi_low_close_vol')
+
+    # time_period_start, time_period_end, time_open, time_close, price_open, price_high, price_low, price_close, volume_traded, trades_count
+    # 2011-09-13T13:53 2011-09-13T13:54 2011-09-13T13:53:36 2011-09-13T13:53:54 5.8 6.0 5.8 6.0 25.0 4
+    data = parse_data('data/BITSTAMP_SPOT_BTC_USD_1MIN.txt.gz', 'json_interval_hi_vol')
 
 
-# <TICKER>,<PER>,<DATE>,<TIME>,<LAST>,<VOL>
-# BTC-PERPETUAL,0,20190508,221239,5881.500000000,1080
-parse_data('data/2019-05-01_2019-06-01_BTC_PERP_DER_TICKS.txt', 'ts_last_vol')
-
-# <TICKER>,<PER>,<DATE>,<TIME>,<OPEN>,<HIGH>,<LOW>,<CLOSE>,<VOL>
-# bitstamp 1 2011-09-13 00:00:00 135300 5.8 6.0 5.8 6.0 25.0
-parse_data('data/BITSTAMP_SPOT_BTC_USD_1MIN_tslab (1).txt.gz', 'ts_open_hi_low_close_vol')
-
-# bitfinex,1,20190526,144300,7998.0,8000.0,7998.0,7998.4,0.3683383\r\n
-parse_data('data/TSLAB_1m_BTUSD_bitfinex.7z', 'ts_open_hi_low_close_vol')
-parse_data('data/TSLAB_1m_ETHUSD_bitfinex (1).7z', 'ts_open_hi_low_close_vol')
-
-# time_period_start, time_period_end, time_open, time_close, price_open, price_high, price_low, price_close, volume_traded, trades_count
-# 2011-09-13T13:53 2011-09-13T13:54 2011-09-13T13:53:36 2011-09-13T13:53:54 5.8 6.0 5.8 6.0 25.0 4
-data = parse_data('data/BITSTAMP_SPOT_BTC_USD_1MIN.txt.gz', 'json_interval_hi_vol')
+    data = data[['high', 'low', 'vol', 'count']]
+    print(data)
+    print(resample_time_series(data, '7D'))
 
 
-data = data[['high', 'low', 'vol', 'count']]
-print(data)
-print(resample_time_series(data, '7D'))
+    # а теперь, после тестовых чтений разных файлов, само преобразование всего нужного файла
+    # исходные файлы в каталоге data лежат только локально, т.к. в guthub не желательно закачивать большие файлы
+
+    data_2 = parse_data('data/BITSTAMP_SPOT_BTC_USD_1MIN_tslab (1).txt.gz', 'ts_open_hi_low_close_vol', nrows=None, verbose=0)
+    data_2 = resample_time_series(data_2, form='bar', interval=None)
+    save_time_series(data_2, "data/BITSTAMP_SPOT_BTC_USD_1MIN_tslab.candlesticks.csv.gz")
+
+    # проверка
+    df = pd.read_csv('data/BITSTAMP_SPOT_BTC_USD_1MIN_tslab.candlesticks.csv.gz', nrows=100, index_col=0, parse_dates=[0])
+    print(df.index.values.dtype)
+    print(df.head())
 
 
-# а теперь, после тестовых чтений разных файлов, само преобразование всего нужного файла
-# исходные файлы в каталоге data лежат только локально, т.к. в guthub не желательно закачивать большие файлы
+# тиковый бар (агрегация по времени)
 
-data_2 = parse_data('data/BITSTAMP_SPOT_BTC_USD_1MIN_tslab (1).txt.gz', 'ts_open_hi_low_close_vol', nrows=None, verbose=0)
-data_2 = resample_time_series(data_2, form='bar', interval=None)
-save_time_series(data_2, "data/BITSTAMP_SPOT_BTC_USD_1MIN_tslab.candlesticks.csv.gz")
+def parse_ticks():
+    # тест
+    data_3 = parse_data('data/2019-05-01_2019-06-01_BTC_PERP_DER_TICKS.txt', 'ts_last_vol', verbose=0)
+    print(data_3.head(60))
+    data_3 = resample_time_series(data_3, form='bar', interval='1min')
+    print(data_3.head(3))
 
-# проверка
-df = pd.read_csv('data/BITSTAMP_SPOT_BTC_USD_1MIN_tslab.candlesticks.csv.gz', nrows=100, index_col=0, parse_dates=[0])
-print(df.index.values.dtype)
-print(df.head())
+    # сохранение
+    save_time_series(parse_data('data/2019-05-01_2019-06-01_BTC_PERP_DER_TICKS.txt', 'ts_last_vol', nrows=None)[['close', 'vol']], "data/ticks1.csv.gz")
+    # проверка
+    print(pd.read_csv('data/ticks1.csv.gz', nrows=10, index_col=0, parse_dates=[0]))
 
+
+parse_ticks()
 
